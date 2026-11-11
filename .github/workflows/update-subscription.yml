@@ -1,0 +1,37 @@
+name: Update MIMIC VPN subscription
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mimic-vpn-subscription
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build combined subscription
+        env:
+          V2HUB_SUB_URL: ${{ secrets.V2HUB_SUB_URL }}
+        run: python3 .github/scripts/build_subscription.py
+
+      - name: Commit updated subscription
+        run: |
+          if git diff --quiet -- mimic-vpn.txt; then
+            echo "Subscription unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add mimic-vpn.txt
+          git commit -m "Update MIMIC VPN subscription"
+          git push
