@@ -255,10 +255,10 @@ def main():
         p = urlsplit(uri)
         output.append(urlunsplit((p.scheme, p.netloc, p.path, p.query, quote(server_name, safe=""))))
 
-    if not output:
-        raise RuntimeError("Итоговый список пуст; прежняя подписка сохранится")
+    if len(output) <= 1:
+        raise RuntimeError("Не удалось определить страны ни для одного сервера; прежняя подписка сохранится")
     OUT.write_text("\n".join(output) + "\n", encoding="utf-8")
-    print(f"Готово: {len(output)} уникальных серверов из {sum(n for _, n in source_counts)} записей")
+    print(f"Готово: {len(output)-1} серверов с определённой страной; исключено без страны или с недоступным адресом: {skipped}")
     for name, count in source_counts:
         print(f"{name}: {count}")
 
