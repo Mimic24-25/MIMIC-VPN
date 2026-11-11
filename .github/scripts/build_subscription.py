@@ -102,6 +102,16 @@ def country_from_uri(uri):
             return name
     return "Неизвестная страна"
 
+def flag_for_country(country):
+    # HAPP displays a flag icon only when the first emoji in the server name is a flag.
+    # Derive flags only for countries explicitly recognized by the source metadata.
+    for code, name in FLAGS.items():
+        if name == country and code != "UK":
+            first = chr(0x1F1E6 + ord(code[0]) - ord("A"))
+            second = chr(0x1F1E6 + ord(code[1]) - ord("A"))
+            return first + second
+    return ""
+
 def canonical(uri):
     p = urlsplit(uri)
     # Ignore only the display fragment when checking duplicates.
@@ -125,13 +135,15 @@ def main():
     entries.sort(key=lambda item: (item[0], canonical(item[1])))
 
     counts = {}
-    output = []
+    output = ["#profile-title: MIMICVPN"]
     for country, uri in entries:
         number = counts.get(country, 0)
         counts[country] = number + 1
         label = country if number == 0 else f"{country} {number}"
+        flag = flag_for_country(country)
+        server_name = f"{flag} {label}" if flag else label
         p = urlsplit(uri)
-        output.append(urlunsplit((p.scheme, p.netloc, p.path, p.query, quote(label, safe=""))))
+        output.append(urlunsplit((p.scheme, p.netloc, p.path, p.query, quote(server_name, safe=""))))
 
     if not output:
         raise RuntimeError("Итоговый список пуст; прежняя подписка сохранится")
