@@ -30,7 +30,7 @@ FLAGS = {
     "BG":"Болгария","GR":"Греция","HU":"Венгрия","IE":"Ирландия","BE":"Бельгия",
     "LT":"Литва","LV":"Латвия","EE":"Эстония","IS":"Исландия","MD":"Молдова",
 }
-FLAG_RE = re.compile(r"\U0001F1E6-\U0001F1FF{2}")
+FLAG_RE = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
 
 def fetch(name, url):
     if not url:
