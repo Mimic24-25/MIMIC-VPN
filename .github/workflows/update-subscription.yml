@@ -20,14 +20,31 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout latest main
         uses: actions/checkout@v4
         with:
           ref: main
 
+      - name: Install Xray-core for real VPN tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y unzip curl
+          curl -fL --retry 3 --retry-delay 2 \
+            https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip \
+            -o "$RUNNER_TEMP/xray.zip"
+          mkdir -p "$RUNNER_TEMP/xray"
+          unzip -q "$RUNNER_TEMP/xray.zip" -d "$RUNNER_TEMP/xray"
+          sudo install -m 0755 "$RUNNER_TEMP/xray/xray" /usr/local/bin/xray
+          xray version
+
       - name: Build combined subscription
         env:
+          XRAY_BIN: /usr/local/bin/xray
+
           V2HUB_SUB_URL: ${{ secrets.V2HUB_SUB_URL }}
         run: python3 .github/scripts/build_subscription.py
 
