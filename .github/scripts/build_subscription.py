@@ -473,13 +473,29 @@ def canonical(uri):
 def main():
     all_uris = []
     source_counts = []
+    source_errors = []
     for name, url in SOURCES:
-        data = fetch(name, url)
-        uris = extract_uris(data)
-        if not uris:
-            raise RuntimeError(f"{name}: загрузка прошла, но VPN-ссылки не найдены; прежняя подписка сохранится")
-        source_counts.append((name, len(uris)))
-        all_uris.extend(uris)
+        try:
+            data = fetch(name, url)
+            uris = extract_uris(data)
+            if not uris:
+                raise RuntimeError("загрузка прошла, но VPN-ссылки не найдены")
+            source_counts.append((name, len(uris)))
+            all_uris.extend(uris)
+            print(f"{name}: получено ссылок: {len(uris)}")
+        except Exception as exc:
+            # A single provider can change its response format or temporarily fail.
+            # Keep building from the remaining providers; fail only if no usable
+            # source remains, so a bad optional source cannot block all updates.
+            source_errors.append((name, str(exc)))
+            print(f"ПРЕДУПРЕЖДЕНИЕ: {name}: {exc}; источник пропущен", file=sys.stderr)
+
+    if not all_uris:
+        details = "; ".join(f"{name}: {error}" for name, error in source_errors)
+        raise RuntimeError(
+            "Ни один источник не предоставил VPN-ссылки; прежняя подписка сохранится. "
+            + details
+        )
 
     unique = {}
     for uri in all_uris:
