@@ -5,9 +5,11 @@ All sources must be fetched successfully before the output file is replaced.
 The V2Hub URL is read only from the V2HUB_SUB_URL environment variable.
 """
 import base64
+import concurrent.futures
 import os
 import re
 import sys
+import socket
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -125,6 +127,55 @@ def host_from_uri(uri):
         return p.hostname or ""
     except Exception:
         return ""
+
+def endpoint_from_uri(uri):
+    """Return (host, port) for TCP reachability checks."""
+    try:
+        p = urlsplit(uri)
+        if p.scheme.lower() == "vmess":
+            token = (p.netloc or p.path).strip("/")
+            raw = base64.b64decode(token + "=" * (-len(token) % 4))
+            import json
+            obj = json.loads(raw.decode("utf-8", "ignore"))
+            return str(obj.get("add", "")).strip("[]"), int(obj.get("port", 0))
+        host = p.hostname or ""
+        port = p.port
+        if port is None and p.scheme.lower() in ("hysteria2", "hy2", "tuic"):
+            port = 443
+        return host, int(port or 0)
+    except Exception:
+        return "", 0
+
+
+def tcp_reachable(uri, timeout=3.5):
+    """Check whether the server's TCP endpoint accepts a connection.
+    This is a reachability check, not a full VPN protocol/handshake test.
+    """
+    host, port = endpoint_from_uri(uri)
+    if not host or not port:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def filter_reachable(entries):
+    if not entries:
+        return [], 0
+    results = [False] * len(entries)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=40) as pool:
+        futures = {pool.submit(tcp_reachable, uri): i for i, (_, uri) in enumerate(entries)}
+        for future in concurrent.futures.as_completed(futures):
+            i = futures[future]
+            try:
+                results[i] = future.result()
+            except Exception:
+                results[i] = False
+    kept = [entry for i, entry in enumerate(entries) if results[i]]
+    return kept, len(entries) - len(kept)
+
 
 def country_from_tag(uri):
     try:
@@ -244,6 +295,11 @@ def main():
         entries.append((country, uri))
     entries.sort(key=lambda item: (item[0], canonical(item[1])))
 
+    before_check = len(entries)
+    entries, tcp_failed = filter_reachable(entries)
+    if not entries:
+        raise RuntimeError("Ни один сервер не прошёл TCP-проверку доступности; прежняя подписка сохранится")
+
     counts = {}
     output = ["#profile-title: MIMICVPN"]
     for country, uri in entries:
@@ -258,7 +314,8 @@ def main():
     if len(output) <= 1:
         raise RuntimeError("Не удалось определить страны ни для одного сервера; прежняя подписка сохранится")
     OUT.write_text("\n".join(output) + "\n", encoding="utf-8")
-    print(f"Готово: {len(output)-1} серверов с определённой страной; исключено без страны или с недоступным адресом: {skipped}")
+    print(f"Готово: {len(output)-1} серверов прошли TCP-проверку; не прошли TCP-проверку: {tcp_failed}; исключено без страны: {skipped}")
+    print("Проверка: TCP-порт доступен; это не гарантирует успешное VPN-подключение или прохождение протокольного handshake.")
     for name, count in source_counts:
         print(f"{name}: {count}")
 
