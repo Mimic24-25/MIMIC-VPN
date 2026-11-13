@@ -11,7 +11,7 @@ Combined HAPP-compatible subscription, generated from the three configured sourc
 5. Save the secret.
 6. Open **Actions → Update MIMIC VPN subscription → Run workflow**.
 
-The workflow refreshes the list every 6 hours. It only replaces `mimic-vpn.txt` after all three sources download successfully and contain recognized proxy links. If a source fails, the previous file is kept.
+The workflow refreshes the list every 6 hours. It downloads Xray-core and actively tests supported VLESS, VMess, Trojan, and Shadowsocks links by starting a local VPN tunnel and making an HTTPS request through it. Only profiles that return a public exit IP are published. Unsupported protocols/transports and failed tunnels are excluded. If a source fails or no profile passes, the previous file is kept. This is a live test at build time; servers can stop working later.
 
 ## HAPP
 
@@ -19,7 +19,7 @@ After the first successful workflow run, use:
 
 `https://raw.githubusercontent.com/Mimic24-25/MIMIC-VPN/main/mimic-vpn.txt`
 
-In HAPP, add this as a subscription URL and set the subscription display name to **MIMIC VPN**. Server labels are generated in Russian from country flags/codes present in source tags. Servers without a recognizable country marker are labeled **Неизвестная страна**.
+In HAPP, add this as a subscription URL and set the subscription display name to **MIMIC VPN**. Server labels are generated in Russian from country flags/codes present in source tags. Servers without a recognizable country marker are omitted.
 
 ## Security
 
