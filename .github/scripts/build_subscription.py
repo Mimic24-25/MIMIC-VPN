@@ -263,7 +263,7 @@ def xray_outbound(uri):
             stream["security"] = "reality"
             stream["realitySettings"] = reality
         elif tls_on:
-            tls = {"serverName": sni or host, "allowInsecure": first("allowInsecure", "0") in ("1", "true")}
+            tls = {"serverName": sni or host, "allowInsecure": False, "minVersion": "1.2", "maxVersion": "1.3"}
             if fp:
                 tls["fingerprint"] = fp
             alpn = first("alpn", "")
@@ -298,12 +298,66 @@ def xray_outbound(uri):
             "outbounds": [outbound]}
 
 
+def enforce_transport_security(uri):
+    """Reject profiles that do not encrypt the client-to-proxy connection safely."""
+    p = urlsplit(uri)
+    scheme = p.scheme.lower()
+    q = parse_qs(p.query)
+    security = q.get("security", [""])[0].lower()
+
+    if scheme == "vless":
+        if security not in ("reality", "tls"):
+            raise ValueError("Rejected by privacy policy: VLESS without TLS/REALITY")
+        if q.get("allowInsecure", ["0"])[0].lower() in ("1", "true", "yes"):
+            raise ValueError("Rejected by privacy policy: insecure TLS certificate validation")
+        if security == "reality" and not q.get("pbk", [""])[0]:
+            raise ValueError("Rejected by privacy policy: REALITY public key is missing")
+        return
+
+    if scheme == "vmess":
+        token = (p.netloc or p.path).strip("/")
+        obj = json.loads(_decode_b64(token).decode("utf-8", "replace"))
+        if str(obj.get("tls", "")).lower() not in ("tls", "true", "1"):
+            raise ValueError("Rejected by privacy policy: VMess without TLS")
+        return
+
+    if scheme == "trojan":
+        if security != "tls":
+            raise ValueError("Rejected by privacy policy: Trojan without TLS")
+        if q.get("allowInsecure", ["0"])[0].lower() in ("1", "true", "yes"):
+            raise ValueError("Rejected by privacy policy: insecure TLS certificate validation")
+        return
+
+    if scheme == "ss":
+        # Only authenticated-encryption ciphers; reject legacy stream/CFB ciphers.
+        userinfo = p.username or ""
+        decoded = _decode_b64(unquote(userinfo)).decode("utf-8", "replace") if userinfo else ""
+        method = ""
+        if ":" in decoded:
+            method = decoded.split(":", 1)[0].lower()
+        else:
+            legacy = _decode_b64((p.netloc or p.path).split("#", 1)[0]).decode("utf-8", "replace")
+            if "@" in legacy and ":" in legacy.split("@", 1)[0]:
+                method = legacy.split("@", 1)[0].split(":", 1)[0].lower()
+        allowed = {
+            "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305",
+            "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm",
+            "2022-blake3-chacha20-poly1305",
+        }
+        if method not in allowed:
+            raise ValueError("Rejected by privacy policy: Shadowsocks cipher is not an approved AEAD cipher")
+        return
+
+    raise ValueError(f"Rejected by privacy policy: unsupported protocol {scheme}")
+
+
 def active_vpn_test(uri, timeout=12):
     """Pass an HTTPS request through an actual Xray tunnel and require a public exit IP."""
     xray = os.environ.get("XRAY_BIN", "xray")
     if not shutil.which(xray):
         return False, "Xray binary is not installed"
     try:
+        enforce_transport_security(uri)
         config = xray_outbound(uri)
         # Xray supports port 0 for ephemeral inbound ports; query its allocated port via
         # a reserved local port instead to keep the SOCKS endpoint deterministic.
