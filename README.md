@@ -32,3 +32,9 @@ In HAPP, add this as a subscription URL and set the subscription display name to
 - The subscription aggregator does not collect end-user browsing history or user credentials. It does make test connections from GitHub Actions to candidate VPN servers and public HTTPS test endpoints when building the list.
 
 These checks reduce exposure to plainly unencrypted or misconfigured profiles. They cannot prevent server operators from collecting connection metadata, guarantee no logging, or provide multi-hop anonymity. For sensitive use, the meaningful solution is a personally controlled server or a reputable VPN provider with independently audited privacy practices.
+
+## DNS privacy in HAPP
+
+The generated subscription also includes a HAPP routing profile that configures encrypted DNS-over-HTTPS (DoH): Cloudflare for remote/proxied DNS and Google for domestic DNS, with the DNS hostnames pinned to their documented IP addresses. HAPP imports and activates this profile from the subscription body. The profile is refreshed with the subscription every 6 hours.
+
+DoH encrypts DNS requests between the HAPP client and the selected DNS resolver. It is **not** a second VPN tunnel and does not hide all connection metadata. The DNS resolver can still process the queries it receives; the VPN server can still observe connection metadata and destination IP addresses. This configuration does not make third-party VPN operators trustworthy or guarantee no logs. Users who prefer another DNS provider can change the routing profile in HAPP after import, if the app permits it for their subscription.
