@@ -603,7 +603,7 @@ def main():
     ).decode("ascii")
     output = [
         "#profile-title: MIMICVPN",
-        "#profile-update-interval: 6",
+        "#profile-update-interval: 1",
         f"happ://routing/onadd/{routing_payload}"
     ]
     for country, uri in entries:
