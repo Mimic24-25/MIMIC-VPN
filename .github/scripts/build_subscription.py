@@ -573,7 +573,39 @@ def main():
         raise RuntimeError("Ни один сервер не прошёл реальную проверку VPN-туннеля; прежняя подписка сохранится")
 
     counts = {}
-    output = ["#profile-title: MIMICVPN"]
+    routing_profile = {
+        "Name": "MIMICVPN Secure DNS",
+        "GlobalProxy": "true",
+        "RemoteDNSType": "DoH",
+        "RemoteDNSDomain": "https://cloudflare-dns.com/dns-query",
+        "RemoteDNSIP": "1.1.1.1",
+        "DomesticDNSType": "DoH",
+        "DomesticDNSDomain": "https://dns.google/dns-query",
+        "DomesticDNSIP": "8.8.8.8",
+        "DnsHosts": {
+            "cloudflare-dns.com": "1.1.1.1",
+            "dns.google": "8.8.8.8"
+        },
+        "DirectSites": [],
+        "DirectIp": [
+            "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+            "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255"
+        ],
+        "ProxySites": [],
+        "ProxyIp": [],
+        "BlockSites": [],
+        "BlockIp": [],
+        "DomainStrategy": "IPIfNonMatch",
+        "FakeDNS": "false"
+    }
+    routing_payload = base64.b64encode(
+        json.dumps(routing_profile, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    output = [
+        "#profile-title: MIMICVPN",
+        "#profile-update-interval: 6",
+        f"happ://routing/onadd/{routing_payload}"
+    ]
     for country, uri in entries:
         number = counts.get(country, 0)
         counts[country] = number + 1
