@@ -397,7 +397,7 @@ def active_vpn_test(uri, baseline_ip=None, timeout=10):
                             capture_output=True, text=True, timeout=timeout + 2)
                         if result.returncode != 0:
                             return None
-                        match = re.search(r"(?<![0-9])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(?![0-9])",
+                        match = re.search(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])",
                                           result.stdout.strip())
                         if not match:
                             return None
