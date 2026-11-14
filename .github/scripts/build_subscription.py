@@ -180,6 +180,8 @@ def xray_outbound(uri):
         protocol = "vmess"
         network = str(obj.get("net") or "tcp").lower()
         tls_on = str(obj.get("tls", "")).lower() in ("tls", "true", "1")
+        # VMess stores TLS in its Base64 JSON, not in the URI query.
+        security = "tls" if tls_on else ""
         sni = str(obj.get("sni") or obj.get("host") or host)
         fp = str(obj.get("fp") or "")
         path = str(obj.get("path") or "/")
@@ -240,6 +242,10 @@ def xray_outbound(uri):
 
     if not host or not port:
         raise ValueError("Missing server host/port")
+
+    # Xray's current name for the TCP transport is "raw".
+    if network == "raw":
+        network = "tcp"
 
     settings = {}
     if protocol == "vless":
@@ -366,65 +372,86 @@ def active_vpn_test(uri, baseline_ip=None, timeout=10):
         with tempfile.TemporaryDirectory(prefix="mimic-xray-") as temp:
             config_path = Path(temp) / "config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
-            proc = subprocess.Popen([xray, "run", "-c", str(config_path)],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            try:
-                deadline = time.monotonic() + 4
-                connected = False
-                while time.monotonic() < deadline:
-                    if proc.poll() is not None:
-                        return False, "Xray exited during startup"
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as xray_log:
+                proc = subprocess.Popen([xray, "run", "-c", str(config_path)],
+                                        stdout=subprocess.DEVNULL, stderr=xray_log)
+
+                def xray_error():
                     try:
-                        with socket.create_connection(("127.0.0.1", socks_port), timeout=0.25):
-                            connected = True
-                            break
-                    except OSError:
-                        time.sleep(0.1)
-                if not connected:
-                    return False, "Local SOCKS proxy did not start"
+                        xray_log.flush()
+                        xray_log.seek(0)
+                        return xray_log.read()[-1200:].strip().replace("\n", " ")
+                    except Exception:
+                        return ""
 
-                urls = [
-                    "https://api.ipify.org",
-                    "https://checkip.amazonaws.com",
-                    "https://ipv4.icanhazip.com",
-                ]
-
-                def check_endpoint(url):
-                    try:
-                        result = subprocess.run(
-                            ["curl", "-4", "-fsS", "--socks5-hostname", f"127.0.0.1:{socks_port}",
-                             "--connect-timeout", "5", "--max-time", str(timeout), url],
-                            capture_output=True, text=True, timeout=timeout + 2)
-                        if result.returncode != 0:
-                            return None
-                        match = re.search(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])",
-                                          result.stdout.strip())
-                        if not match:
-                            return None
-                        import ipaddress
-                        ip = ipaddress.ip_address(match.group(0))
-                        return str(ip) if ip.version == 4 and ip.is_global else None
-                    except (subprocess.TimeoutExpired, OSError, ValueError):
-                        return None
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as checks:
-                    observed = list(checks.map(check_endpoint, urls))
-                valid = [ip for ip in observed if ip]
-                if len(valid) < 2:
-                    return False, f"Only {len(valid)}/3 independent HTTPS IP checks succeeded"
-                if len(set(valid)) != 1:
-                    return False, "HTTPS providers reported inconsistent VPN exit IPs"
-                exit_ip = valid[0]
-                if baseline_ip and exit_ip == baseline_ip:
-                    return False, "Exit IP matches GitHub runner direct IP; VPN tunnel not confirmed"
-                return True, exit_ip
-            finally:
-                proc.terminate()
                 try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=2)
+                    deadline = time.monotonic() + 5
+                    connected = False
+                    while time.monotonic() < deadline:
+                        if proc.poll() is not None:
+                            detail = xray_error()
+                            return False, "Xray exited during startup" + (f": {detail}" if detail else "")
+                        try:
+                            with socket.create_connection(("127.0.0.1", socks_port), timeout=0.25):
+                                connected = True
+                                break
+                        except OSError:
+                            time.sleep(0.1)
+                    if not connected:
+                        detail = xray_error()
+                        return False, "Local SOCKS proxy did not start" + (f": {detail}" if detail else "")
+
+                    urls = [
+                        "https://api.ipify.org",
+                        "https://checkip.amazonaws.com",
+                        "https://ipv4.icanhazip.com",
+                    ]
+
+                    def check_endpoint(url):
+                        try:
+                            result = subprocess.run(
+                                ["curl", "-4", "-fsS", "--socks5-hostname", f"127.0.0.1:{socks_port}",
+                                 "--connect-timeout", "5", "--max-time", str(timeout), url],
+                                capture_output=True, text=True, timeout=timeout + 2)
+                            if result.returncode != 0:
+                                reason = (result.stderr or f"curl exit {result.returncode}").strip()
+                                return None, reason[:180]
+                            match = re.search(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])",
+                                              result.stdout.strip())
+                            if not match:
+                                return None, "provider returned no IPv4 address"
+                            import ipaddress
+                            ip = ipaddress.ip_address(match.group(0))
+                            if ip.version != 4 or not ip.is_global:
+                                return None, "provider returned a non-public IPv4 address"
+                            return str(ip), ""
+                        except subprocess.TimeoutExpired:
+                            return None, "curl request timed out"
+                        except OSError as exc:
+                            return None, f"curl execution failed: {exc}"
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as checks:
+                        observed = list(checks.map(check_endpoint, urls))
+                    valid = [ip for ip, _ in observed if ip]
+                    if len(valid) < 2:
+                        reasons = "; ".join(
+                            f"{urls[i].split('/')[2]}: {reason}"
+                            for i, (ip, reason) in enumerate(observed) if not ip
+                        )
+                        return False, f"Only {len(valid)}/3 independent HTTPS IP checks succeeded" + (f" ({reasons})" if reasons else "")
+                    if len(set(valid)) != 1:
+                        return False, "HTTPS providers reported inconsistent VPN exit IPs: " + ", ".join(valid)
+                    exit_ip = valid[0]
+                    if baseline_ip and exit_ip == baseline_ip:
+                        return False, "Exit IP matches GitHub runner direct IP; VPN tunnel not confirmed"
+                    return True, exit_ip
+                finally:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=2)
     except Exception as exc:
         return False, str(exc)
 
