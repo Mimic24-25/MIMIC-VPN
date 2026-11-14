@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout latest main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
 
