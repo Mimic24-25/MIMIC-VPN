@@ -430,18 +430,32 @@ def active_vpn_test(uri, baseline_ip=None, timeout=10):
                         except OSError as exc:
                             return None, f"curl execution failed: {exc}"
 
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as checks:
-                        observed = list(checks.map(check_endpoint, urls))
-                    valid = [ip for ip, _ in observed if ip]
-                    if len(valid) < 2:
-                        reasons = "; ".join(
-                            f"{urls[i].split('/')[2]}: {reason}"
-                            for i, (ip, reason) in enumerate(observed) if not ip
-                        )
-                        return False, f"Only {len(valid)}/3 independent HTTPS IP checks succeeded" + (f" ({reasons})" if reasons else "")
-                    if len(set(valid)) != 1:
-                        return False, "HTTPS providers reported inconsistent VPN exit IPs: " + ", ".join(valid)
-                    exit_ip = valid[0]
+                    def verify_round():
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as checks:
+                            observed = list(checks.map(check_endpoint, urls))
+                        valid = [ip for ip, _ in observed if ip]
+                        if len(valid) < 2:
+                            reasons = "; ".join(
+                                f"{urls[i].split('/')[2]}: {reason}"
+                                for i, (ip, reason) in enumerate(observed) if not ip
+                            )
+                            return None, f"Only {len(valid)}/3 independent HTTPS IP checks succeeded" + (f" ({reasons})" if reasons else "")
+                        if len(set(valid)) != 1:
+                            return None, "HTTPS providers reported inconsistent VPN exit IPs: " + ", ".join(valid)
+                        return valid[0], ""
+
+                    # A single successful probe can be a transient response. Require
+                    # two consecutive independent rounds through the same VPN exit.
+                    first_ip, first_error = verify_round()
+                    if not first_ip:
+                        return False, first_error
+                    time.sleep(1)
+                    second_ip, second_error = verify_round()
+                    if not second_ip:
+                        return False, "Second stability check failed: " + second_error
+                    if first_ip != second_ip:
+                        return False, f"VPN exit IP changed between stability checks: {first_ip} -> {second_ip}"
+                    exit_ip = second_ip
                     if baseline_ip and exit_ip == baseline_ip:
                         return False, "Exit IP matches GitHub runner direct IP; VPN tunnel not confirmed"
                     return True, exit_ip
@@ -685,7 +699,7 @@ def main():
         raise RuntimeError("Не удалось определить страны ни для одного сервера; прежняя подписка сохранится")
     OUT.write_text("\n".join(output) + "\n", encoding="utf-8")
     print(f"Готово: {len(output)-1} серверов прошли реальный VPN-тест; не прошли тест: {active_failed}; неподдерживаемые форматы/транспорты: {unsupported}; исключено без страны: {skipped}")
-    print("Проверка включает запуск Xray, SOCKS-туннель, 3 независимые HTTPS-проверки внешнего IP (минимум 2 совпадающих ответа) и сравнение с прямым IP GitHub runner.")
+    print("Проверка включает запуск Xray, SOCKS-туннель, два последовательных раунда по 3 независимым HTTPS-проверкам (минимум 2 совпадающих ответа в каждом раунде), одинаковый VPN exit IP в обоих раундах и сравнение с прямым IP GitHub runner.")
     for name, count in source_counts:
         print(f"{name}: {count}")
 
