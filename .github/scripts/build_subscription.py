@@ -351,16 +351,14 @@ def enforce_transport_security(uri):
     raise ValueError(f"Rejected by privacy policy: unsupported protocol {scheme}")
 
 
-def active_vpn_test(uri, timeout=12):
-    """Pass an HTTPS request through an actual Xray tunnel and require a public exit IP."""
+def active_vpn_test(uri, baseline_ip=None, timeout=10):
+    """Pass independent HTTPS checks through Xray and verify the VPN exit IP."""
     xray = os.environ.get("XRAY_BIN", "xray")
     if not shutil.which(xray):
         return False, "Xray binary is not installed"
     try:
         enforce_transport_security(uri)
         config = xray_outbound(uri)
-        # Xray supports port 0 for ephemeral inbound ports; query its allocated port via
-        # a reserved local port instead to keep the SOCKS endpoint deterministic.
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             socks_port = sock.getsockname()[1]
@@ -384,24 +382,42 @@ def active_vpn_test(uri, timeout=12):
                         time.sleep(0.1)
                 if not connected:
                     return False, "Local SOCKS proxy did not start"
-                urls = ["https://api.ipify.org", "https://www.cloudflare.com/cdn-cgi/trace"]
-                for url in urls:
+
+                urls = [
+                    "https://api.ipify.org",
+                    "https://checkip.amazonaws.com",
+                    "https://ipv4.icanhazip.com",
+                ]
+
+                def check_endpoint(url):
                     try:
                         result = subprocess.run(
-                            ["curl", "-fsS", "--socks5-hostname", f"127.0.0.1:{socks_port}",
+                            ["curl", "-4", "-fsS", "--socks5-hostname", f"127.0.0.1:{socks_port}",
                              "--connect-timeout", "5", "--max-time", str(timeout), url],
                             capture_output=True, text=True, timeout=timeout + 2)
-                        body = result.stdout.strip()
-                        if result.returncode == 0 and body:
-                            if url.endswith("/trace"):
-                                match = re.search(r"(?m)^ip=(\d{1,3}(?:\.\d{1,3}){3})$", body)
-                                if match:
-                                    return True, match.group(1)
-                            elif re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", body):
-                                return True, body
-                    except (subprocess.TimeoutExpired, OSError):
-                        pass
-                return False, "HTTPS request through VPN tunnel failed"
+                        if result.returncode != 0:
+                            return None
+                        match = re.search(r"(?<![0-9])(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(?![0-9])",
+                                          result.stdout.strip())
+                        if not match:
+                            return None
+                        import ipaddress
+                        ip = ipaddress.ip_address(match.group(0))
+                        return str(ip) if ip.version == 4 and ip.is_global else None
+                    except (subprocess.TimeoutExpired, OSError, ValueError):
+                        return None
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as checks:
+                    observed = list(checks.map(check_endpoint, urls))
+                valid = [ip for ip in observed if ip]
+                if len(valid) < 2:
+                    return False, f"Only {len(valid)}/3 independent HTTPS IP checks succeeded"
+                if len(set(valid)) != 1:
+                    return False, "HTTPS providers reported inconsistent VPN exit IPs"
+                exit_ip = valid[0]
+                if baseline_ip and exit_ip == baseline_ip:
+                    return False, "Exit IP matches GitHub runner direct IP; VPN tunnel not confirmed"
+                return True, exit_ip
             finally:
                 proc.terminate()
                 try:
@@ -414,13 +430,29 @@ def active_vpn_test(uri, timeout=12):
 
 
 def filter_reachable(entries):
-    """Keep only entries that complete a real VPN tunnel and HTTPS request."""
+    """Keep only entries that prove a distinct VPN exit via multiple HTTPS providers."""
     if not entries:
         return [], 0, 0
+
+    # A proxy response through the runner's normal connection is not a VPN.
+    try:
+        baseline = subprocess.run(
+            ["curl", "-4", "-fsS", "--connect-timeout", "5", "--max-time", "10",
+             "https://api.ipify.org"],
+            capture_output=True, text=True, timeout=12)
+        baseline_ip = baseline.stdout.strip()
+        import ipaddress
+        parsed_baseline = ipaddress.ip_address(baseline_ip)
+        if baseline.returncode != 0 or parsed_baseline.version != 4 or not parsed_baseline.is_global:
+            raise ValueError("invalid direct public IP")
+    except Exception as exc:
+        raise RuntimeError(f"Не удалось получить контрольный внешний IP GitHub runner: {exc}")
+
+    print("Контрольный IP GitHub runner получен; проверяется отдельный VPN exit IP.")
     results = [False] * len(entries)
     unsupported = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(active_vpn_test, uri): i for i, (_, uri) in enumerate(entries)}
+        futures = {pool.submit(active_vpn_test, uri, baseline_ip): i for i, (_, uri) in enumerate(entries)}
         for future in concurrent.futures.as_completed(futures):
             i = futures[future]
             try:
@@ -619,7 +651,7 @@ def main():
         raise RuntimeError("Не удалось определить страны ни для одного сервера; прежняя подписка сохранится")
     OUT.write_text("\n".join(output) + "\n", encoding="utf-8")
     print(f"Готово: {len(output)-1} серверов прошли реальный VPN-тест; не прошли тест: {active_failed}; неподдерживаемые форматы/транспорты: {unsupported}; исключено без страны: {skipped}")
-    print("Проверка включает запуск Xray, установление туннеля и HTTPS-запрос через SOCKS-прокси с проверкой внешнего IP.")
+    print("Проверка включает запуск Xray, SOCKS-туннель, 3 независимые HTTPS-проверки внешнего IP (минимум 2 совпадающих ответа) и сравнение с прямым IP GitHub runner.")
     for name, count in source_counts:
         print(f"{name}: {count}")
 
