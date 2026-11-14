@@ -451,6 +451,7 @@ def filter_reachable(entries):
     print("Контрольный IP GitHub runner получен; проверяется отдельный VPN exit IP.")
     results = [False] * len(entries)
     unsupported = 0
+    failure_reasons = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(active_vpn_test, uri, baseline_ip): i for i, (_, uri) in enumerate(entries)}
         for future in concurrent.futures.as_completed(futures):
@@ -458,10 +459,16 @@ def filter_reachable(entries):
             try:
                 ok, detail = future.result()
                 results[i] = ok
-                if not ok and ("Unsupported protocol" in detail or "Unsupported Xray transport" in detail):
-                    unsupported += 1
-            except Exception:
+                if not ok:
+                    failure_reasons[detail] = failure_reasons.get(detail, 0) + 1
+                    if "Unsupported protocol" in detail or "Unsupported Xray transport" in detail:
+                        unsupported += 1
+            except Exception as exc:
                 results[i] = False
+                reason = f"Unexpected test error: {exc}"
+                failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+    for reason, count in sorted(failure_reasons.items(), key=lambda item: (-item[1], item[0]))[:12]:
+        print(f"Причина исключения ({count}): {reason}")
     kept = [entry for i, entry in enumerate(entries) if results[i]]
     return kept, len(entries) - len(kept), unsupported
 
