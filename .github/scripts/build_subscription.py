@@ -514,6 +514,19 @@ def filter_reachable(entries):
     return kept, len(entries) - len(kept), unsupported
 
 
+def endpoint_latency_ms(uri):
+    """Measure TCP handshake latency to the configured endpoint for ranking only."""
+    host, port = endpoint_from_uri(uri)
+    if not host or not port:
+        return float("inf")
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=4):
+            return (time.perf_counter() - started) * 1000.0
+    except OSError:
+        return float("inf")
+
+
 def country_from_tag(uri):
     try:
         tag = unquote(urlsplit(uri).fragment)
@@ -652,6 +665,39 @@ def main():
     if not entries:
         raise RuntimeError("Ни один сервер не прошёл реальную проверку VPN-туннеля; прежняя подписка сохранится")
 
+    # Publish four country-specific winners only when every country has at
+    # least one server that passed the full active VPN tunnel checks.
+    required_countries = ("Нидерланды", "Германия", "Финляндия", "США")
+    missing = [country for country in required_countries
+               if not any(item[0] == country for item in entries)]
+    if missing:
+        raise RuntimeError(
+            "Не найдены прошедшие полную VPN-проверку серверы для обязательных стран: "
+            + ", ".join(missing)
+            + ". Прежняя подписка сохранится."
+        )
+
+    # TCP handshake latency is used only to rank already-working VPN
+    # endpoints; it is not presented as a full throughput measurement.
+    latency_ms = {uri: endpoint_latency_ms(uri) for _, uri in entries}
+    best_by_country = {}
+    for country in required_countries:
+        candidates = [uri for item_country, uri in entries if item_country == country]
+        best_by_country[country] = min(
+            candidates,
+            key=lambda uri: (latency_ms.get(uri, float("inf")), canonical(uri))
+        )
+
+    best_uris = set(best_by_country.values())
+    ordered_entries = [
+        (country, best_by_country[country], True)
+        for country in required_countries
+    ]
+    ordered_entries.extend(
+        (country, uri, False)
+        for country, uri in entries if uri not in best_uris
+    )
+
     counts = {}
     routing_profile = {
         "Name": "MIMICVPN Secure DNS",
@@ -686,10 +732,14 @@ def main():
         "#profile-update-interval: 1",
         f"happ://routing/onadd/{routing_payload}"
     ]
-    for country, uri in entries:
-        number = counts.get(country, 0)
-        counts[country] = number + 1
-        label = country if number == 0 else f"{country} {number}"
+    for country, uri, is_best in ordered_entries:
+        if is_best:
+            label = f"{country} — Лучший сервер"
+            counts[country] = 1
+        else:
+            number = counts.get(country, 0)
+            counts[country] = number + 1
+            label = country if number == 0 else f"{country} {number}"
         flag = flag_for_country(country)
         server_name = f"{flag} {label}" if flag else label
         p = urlsplit(uri)
@@ -699,6 +749,11 @@ def main():
         raise RuntimeError("Не удалось определить страны ни для одного сервера; прежняя подписка сохранится")
     OUT.write_text("\n".join(output) + "\n", encoding="utf-8")
     print(f"Готово: {len(output)-1} серверов прошли реальный VPN-тест; не прошли тест: {active_failed}; неподдерживаемые форматы/транспорты: {unsupported}; исключено без страны: {skipped}")
+    for country in required_countries:
+        winner = best_by_country[country]
+        measured = latency_ms.get(winner, float("inf"))
+        latency_text = f"{measured:.1f} ms" if measured != float("inf") else "TCP latency unavailable"
+        print(f"Лучший сервер — {country}: {latency_text}")
     print("Проверка включает запуск Xray, SOCKS-туннель, два последовательных раунда по 3 независимым HTTPS-проверкам (минимум 2 совпадающих ответа в каждом раунде), одинаковый VPN exit IP в обоих раундах и сравнение с прямым IP GitHub runner.")
     for name, count in source_counts:
         print(f"{name}: {count}")
