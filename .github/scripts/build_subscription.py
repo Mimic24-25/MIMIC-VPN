@@ -17,7 +17,7 @@ import sys
 import socket
 import urllib.request
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs
+from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit, parse_qs
 
 SOURCES = [
     ("Wepogp-1", os.environ.get("WEPOGP_SOURCE_1_URL", "").strip()),
@@ -42,7 +42,7 @@ FLAG_RE = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
 
 def fetch(name, url):
     if not url:
-        raise RuntimeError("Не задан GitHub Secret V2HUB_SUB_URL")
+        raise RuntimeError(f"Не задан GitHub Secret для источника {name}")
     req = urllib.request.Request(url, headers={"User-Agent":"MIMIC-VPN-Subscription/1.0"})
     with urllib.request.urlopen(req, timeout=35) as response:
         raw = response.read(8 * 1024 * 1024 + 1)
@@ -67,11 +67,59 @@ def decode_payload(text):
 def extract_uris(payload):
     payload = decode_payload(payload)
     found = []
+    try:
+        profile = json.loads(payload)
+    except Exception:
+        profile = None
+    # Convert supported Xray JSON outbounds into portable share links.
+    if isinstance(profile, dict) and isinstance(profile.get("outbounds"), list):
+        for outbound in profile["outbounds"]:
+            protocol = str(outbound.get("protocol", "")).lower()
+            settings = outbound.get("settings", {})
+            stream = outbound.get("streamSettings", {})
+            if protocol not in ("vless", "trojan"):
+                continue
+            servers = settings.get("vnext", []) if protocol == "vless" else settings.get("servers", [])
+            for server in servers:
+                host, port = str(server.get("address", "")).strip(), int(server.get("port", 0) or 0)
+                users = server.get("users", []) if protocol == "vless" else [server]
+                for user in users:
+                    credential = str(user.get("id", "") if protocol == "vless" else user.get("password", ""))
+                    if not host or not port or not credential:
+                        continue
+                    params = {}
+                    if stream.get("network"):
+                        params["type"] = stream["network"]
+                    if stream.get("security"):
+                        params["security"] = stream["security"]
+                    tls, reality = stream.get("tlsSettings", {}), stream.get("realitySettings", {})
+                    if tls.get("serverName") or reality.get("serverName"):
+                        params["sni"] = tls.get("serverName") or reality.get("serverName")
+                    if tls.get("fingerprint") or reality.get("fingerprint"):
+                        params["fp"] = tls.get("fingerprint") or reality.get("fingerprint")
+                    if tls.get("alpn"):
+                        params["alpn"] = ",".join(tls["alpn"])
+                    if reality.get("publicKey"):
+                        params["pbk"] = reality["publicKey"]
+                    if reality.get("shortId"):
+                        params["sid"] = reality["shortId"]
+                    transport = stream.get("xhttpSettings") or stream.get("wsSettings") or stream.get("grpcSettings") or {}
+                    if transport.get("path"):
+                        params["path"] = transport["path"]
+                    if transport.get("host"):
+                        params["host"] = transport["host"]
+                    if user.get("flow"):
+                        params["flow"] = user["flow"]
+                    if user.get("encryption"):
+                        params["encryption"] = user["encryption"]
+                    fragment = quote(str(outbound.get("tag") or profile.get("remarks") or "Xray server"), safe="")
+                    found.append(f"{protocol}://{quote(credential, safe='')}@{host}:{port}?{urlencode(params)}#{fragment}")
+    if found:
+        return found
     for line in payload.splitlines():
         line = line.strip().strip("\ufeff")
         if not line or line.startswith(("#", ";")):
             continue
-        # A source may place multiple links on one line.
         for match in re.finditer(r"(?i)(?:vless|vmess|trojan|ss|hy2|hysteria2|tuic|socks)://[^\s<>\"']+", line):
             uri = match.group(0).rstrip("),;]")
             if uri.lower().startswith(SCHEMES):
