@@ -16,6 +16,7 @@ import re
 import sys
 import socket
 import urllib.request
+import urllib.error
 from pathlib import Path
 from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit, parse_qs
 
@@ -44,11 +45,24 @@ def fetch(name, url):
     if not url:
         raise RuntimeError(f"Не задан GitHub Secret для источника {name}")
     req = urllib.request.Request(url, headers={"User-Agent":"MIMIC-VPN-Subscription/1.0"})
-    with urllib.request.urlopen(req, timeout=35) as response:
-        raw = response.read(8 * 1024 * 1024 + 1)
-    if len(raw) > 8 * 1024 * 1024:
-        raise RuntimeError(f"{name}: источник больше 8 МБ")
-    return raw.decode("utf-8-sig", errors="replace")
+    last_error = None
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=35) as response:
+                raw = response.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                raise RuntimeError(f"{name}: источник больше 8 МБ")
+            return raw.decode("utf-8-sig", errors="replace")
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code not in (408, 429, 500, 502, 503, 504) or attempt == 3:
+                raise
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt == 3:
+                raise
+        time.sleep(min(2 ** attempt, 8))
+    raise RuntimeError(f"{name}: загрузка не удалась после повторных попыток: {last_error}")
 
 def decode_payload(text):
     text = text.strip()
