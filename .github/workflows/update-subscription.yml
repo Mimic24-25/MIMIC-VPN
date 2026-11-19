@@ -45,7 +45,8 @@ jobs:
         env:
           XRAY_BIN: /usr/local/bin/xray
 
-          V2HUB_SUB_URL: ${{ secrets.V2HUB_SUB_URL }}
+          WEPOGP_SOURCE_1_URL: ${{ secrets.WEPOGP_SOURCE_1_URL }}
+          WEPOGP_SOURCE_2_URL: ${{ secrets.WEPOGP_SOURCE_2_URL }}
         run: python3 .github/scripts/build_subscription.py
 
       - name: Publish subscription safely
