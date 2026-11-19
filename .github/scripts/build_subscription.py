@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build a single MIMIC VPN subscription from three sources.
+"""Build a single MIMIC VPN subscription from configured sources.
 
-All sources must be fetched successfully before the output file is replaced.
-The V2Hub URL is read only from the V2HUB_SUB_URL environment variable.
+All available sources are fetched before the output file is replaced.
+Private Wepogp subscription URLs are read only from GitHub Secrets.
 """
 import base64
 import concurrent.futures
@@ -20,9 +20,10 @@ from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit, urlunsplit, parse_qs
 
 SOURCES = [
-    ("V2Hub", os.environ.get("V2HUB_SUB_URL", "").strip()),
+    ("Wepogp-1", os.environ.get("WEPOGP_SOURCE_1_URL", "").strip()),
     ("VlessForU", "https://sub.vlessfo.ru/vlessforu/working_configs.txt"),
-    ("Blacklist", "https://raw.githubusercontent.com/Buffetbarko/Universal-Proxy-Config-Parser-/main/blacklist_vpn.txt"),
+    ("Wepogp-2", os.environ.get("WEPOGP_SOURCE_2_URL", "").strip()),
+    ("FreeVPN-Cracks", "https://raw.githubusercontent.com/gooseteam-hackers/freevpn-cracks/refs/heads/main/subscription_auto.txt"),
 ]
 OUT = Path("mimic-vpn.txt")
 SCHEMES = ("vless://", "vmess://", "trojan://", "ss://", "hy2://", "hysteria2://", "tuic://", "socks://")
