@@ -18,7 +18,7 @@ import socket
 import urllib.request
 import urllib.error
 from pathlib import Path
-from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit, parse_qs
+from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit, parse_qs, parse_qsl
 
 SOURCES = [
     ("Wepogp-1", os.environ.get("WEPOGP_SOURCE_1_URL", "").strip()),
@@ -706,6 +706,20 @@ def flag_for_country(country):
             return first + second
     return ""
 
+def normalize_happ_xhttp_uri(uri):
+    """Remove non-portable XHTTP extra before testing, so tests match published links."""
+    p = urlsplit(uri)
+    params = parse_qsl(p.query, keep_blank_values=True)
+    is_xhttp = any(key.lower() == "type" and value.lower() in ("xhttp", "splithttp")
+                   for key, value in params)
+    if not is_xhttp:
+        return uri
+    filtered = [(key, value) for key, value in params if key.lower() != "extra"]
+    if len(filtered) == len(params):
+        return uri
+    return urlunsplit((p.scheme, p.netloc, p.path, urlencode(filtered), p.fragment))
+
+
 def canonical(uri):
     p = urlsplit(uri)
     # Ignore only the display fragment when checking duplicates.
@@ -744,7 +758,12 @@ def main():
     unique = {}
     for uri in all_uris:
         unique.setdefault(canonical(uri), uri)
-    raw_entries = list(unique.values())
+    raw_entries = [normalize_happ_xhttp_uri(uri) for uri in unique.values()]
+    # Active VPN tests now exercise the exact XHTTP links that HAPP will receive.
+    unique_normalized = {}
+    for uri in raw_entries:
+        unique_normalized.setdefault(canonical(uri), uri)
+    raw_entries = list(unique_normalized.values())
     tagged = {uri: country_from_tag(uri) for uri in raw_entries}
     hosts = {host_from_uri(uri) for uri in raw_entries if not tagged[uri]}
     geo = geolocate_hosts({h for h in hosts if h})
