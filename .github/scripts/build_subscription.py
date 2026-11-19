@@ -504,7 +504,7 @@ def active_vpn_test(uri, baseline_ip=None, timeout=10):
                     def check_endpoint(url):
                         try:
                             result = subprocess.run(
-                                ["curl", "-4", "-fsS", "--socks5-hostname", f"127.0.0.1:{socks_port}",
+                                ["curl", "-4", "-fsS", "--request", "GET", "--socks5-hostname", f"127.0.0.1:{socks_port}",
                                  "--connect-timeout", "5", "--max-time", str(timeout), url],
                                 capture_output=True, text=True, timeout=timeout + 2)
                             if result.returncode != 0:
@@ -572,7 +572,7 @@ def filter_reachable(entries):
     # A proxy response through the runner's normal connection is not a VPN.
     try:
         baseline = subprocess.run(
-            ["curl", "-4", "-fsS", "--connect-timeout", "5", "--max-time", "10",
+            ["curl", "-4", "-fsS", "--request", "GET", "--connect-timeout", "5", "--max-time", "10",
              "https://api.ipify.org"],
             capture_output=True, text=True, timeout=12)
         baseline_ip = baseline.stdout.strip()
@@ -609,15 +609,57 @@ def filter_reachable(entries):
 
 
 def endpoint_latency_ms(uri):
-    """Measure TCP handshake latency to the configured endpoint for ranking only."""
-    host, port = endpoint_from_uri(uri)
-    if not host or not port:
+    """Measure HTTPS GET response latency through the tested Xray VPN tunnel."""
+    xray = os.environ.get("XRAY_BIN", "xray")
+    if not shutil.which(xray):
         return float("inf")
-    started = time.perf_counter()
     try:
-        with socket.create_connection((host, port), timeout=4):
-            return (time.perf_counter() - started) * 1000.0
-    except OSError:
+        enforce_transport_security(uri)
+        config = xray_outbound(uri)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            socks_port = sock.getsockname()[1]
+        config["inbounds"][0]["port"] = socks_port
+        with tempfile.TemporaryDirectory(prefix="mimic-xray-rank-") as temp:
+            config_path = Path(temp) / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            proc = subprocess.Popen([xray, "run", "-c", str(config_path)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if proc.poll() is not None:
+                        return float("inf")
+                    try:
+                        with socket.create_connection(("127.0.0.1", socks_port), timeout=0.25):
+                            break
+                    except OSError:
+                        time.sleep(0.1)
+                else:
+                    return float("inf")
+
+                started = time.perf_counter()
+                result = subprocess.run(
+                    ["curl", "-4", "-fsS", "--request", "GET",
+                     "--socks5-hostname", f"127.0.0.1:{socks_port}",
+                     "--connect-timeout", "5", "--max-time", "8",
+                     "https://api.ipify.org"],
+                    capture_output=True, text=True, timeout=10)
+                if result.returncode != 0:
+                    return float("inf")
+                import ipaddress
+                ip = ipaddress.ip_address(result.stdout.strip())
+                if ip.version != 4 or not ip.is_global:
+                    return float("inf")
+                return (time.perf_counter() - started) * 1000.0
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+    except Exception:
         return float("inf")
 
 
@@ -824,9 +866,13 @@ def main():
             + ". Прежняя подписка сохранится."
         )
 
-    # TCP handshake latency is used only to rank already-working VPN
-    # endpoints; it is not presented as a full throughput measurement.
-    latency_ms = {uri: endpoint_latency_ms(uri) for _, uri in entries}
+    # Rank only already-working servers by HTTPS GET response latency
+    # measured through their own Xray/SOCKS VPN tunnel.
+    latency_ms = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        latency_futures = {pool.submit(endpoint_latency_ms, uri): uri for _, uri in entries}
+        for future in concurrent.futures.as_completed(latency_futures):
+            latency_ms[latency_futures[future]] = future.result()
     best_by_country = {}
     for country in required_countries:
         candidates = [uri for item_country, uri in entries if item_country == country]
