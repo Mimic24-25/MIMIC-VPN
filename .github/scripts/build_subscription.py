@@ -619,21 +619,24 @@ def canonical(uri):
 
 def main():
     all_uris = []
-    source_counts = []
+    source_counts = {}
     source_errors = []
+    source_uris = {name: set() for name, _ in SOURCES}
+    source_map = {}
     for name, url in SOURCES:
         try:
             data = fetch(name, url)
             uris = extract_uris(data)
             if not uris:
                 raise RuntimeError("загрузка прошла, но VPN-ссылки не найдены")
-            source_counts.append((name, len(uris)))
+            source_counts[name] = len(uris)
+            for uri in uris:
+                key = canonical(uri)
+                source_uris[name].add(key)
+                source_map.setdefault(key, set()).add(name)
             all_uris.extend(uris)
             print(f"{name}: получено ссылок: {len(uris)}")
         except Exception as exc:
-            # A single provider can change its response format or temporarily fail.
-            # Keep building from the remaining providers; fail only if no usable
-            # source remains, so a bad optional source cannot block all updates.
             source_errors.append((name, str(exc)))
             print(f"ПРЕДУПРЕЖДЕНИЕ: {name}: {exc}; источник пропущен", file=sys.stderr)
 
@@ -661,7 +664,38 @@ def main():
         entries.append((country, uri))
     entries.sort(key=lambda item: (item[0], canonical(item[1])))
 
+    # Keep a per-provider view even when the same URI appears in multiple sources.
+    tested_keys = {canonical(uri) for _, uri in entries}
     entries, active_failed, unsupported = filter_reachable(entries)
+    passed_keys = {canonical(uri) for _, uri in entries}
+
+    print("\\nСТАТИСТИКА ПО ИСТОЧНИКАМ (дубли учитываются у каждого поставщика):")
+    summary_lines = [
+        "## Статистика VPN-источников",
+        "",
+        "| Источник | Получено ссылок | Уникальных конфигов | Проверено | Прошло VPN-тест | Не прошло | Доля успеха |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for name, _ in SOURCES:
+        keys = source_uris[name]
+        tested = len(keys & tested_keys)
+        passed = len(keys & passed_keys)
+        failed = tested - passed
+        fetched = source_counts.get(name, 0)
+        unique_count = len(keys)
+        rate = f"{passed / tested * 100:.1f}%" if tested else "—"
+        error = next((message for source, message in source_errors if source == name), "")
+        suffix = f" (источник пропущен: {error})" if error else ""
+        print(f"{name}: получено {fetched}; уникальных {unique_count}; проверено {tested}; прошло {passed}; не прошло {failed}; успех {rate}{suffix}")
+        summary_lines.append(f"| {name} | {fetched} | {unique_count} | {tested} | {passed} | {failed} | {rate} |")
+    untested_country = len(raw_entries) - len(tested_keys)
+    summary_lines.extend(["", f"Не определена страна: {untested_country}.", "",
+        "Примечание: одинаковые конфиги, найденные в нескольких источниках, учитываются в статистике каждого такого источника; поэтому суммы по источникам могут быть больше общего числа уникальных конфигов.",
+        "Проверка — реальный Xray/SOCKS-туннель с двумя раундами независимых HTTPS-проверок. Это не измерение пропускной способности или IP-репутации."])
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as summary_file:
+            summary_file.write("\\n".join(summary_lines) + "\\n")
     if not entries:
         raise RuntimeError("Ни один сервер не прошёл реальную проверку VPN-туннеля; прежняя подписка сохранится")
 
@@ -755,8 +789,7 @@ def main():
         latency_text = f"{measured:.1f} ms" if measured != float("inf") else "TCP latency unavailable"
         print(f"Лучший сервер — {country}: {latency_text}")
     print("Проверка включает запуск Xray, SOCKS-туннель, два последовательных раунда по 3 независимым HTTPS-проверкам (минимум 2 совпадающих ответа в каждом раунде), одинаковый VPN exit IP в обоих раундах и сравнение с прямым IP GitHub runner.")
-    for name, count in source_counts:
-        print(f"{name}: {count}")
+    print(f"Всего уникальных конфигов: {len(raw_entries)}; прошли геолокацию и отправлены на активный тест: {len(tested_keys)}; без определённой страны: {untested_country}.")
 
 if __name__ == "__main__":
     try:
