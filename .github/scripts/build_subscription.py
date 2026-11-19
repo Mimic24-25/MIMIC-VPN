@@ -669,7 +669,7 @@ def main():
     entries, active_failed, unsupported = filter_reachable(entries)
     passed_keys = {canonical(uri) for _, uri in entries}
 
-    print("\\nСТАТИСТИКА ПО ИСТОЧНИКАМ (дубли учитываются у каждого поставщика):")
+    print("\nСТАТИСТИКА ПО ИСТОЧНИКАМ (дубли учитываются у каждого поставщика):")
     summary_lines = [
         "## Статистика VPN-источников",
         "",
@@ -695,7 +695,7 @@ def main():
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as summary_file:
-            summary_file.write("\\n".join(summary_lines) + "\\n")
+            summary_file.write("\n".join(summary_lines) + "\n")
     if not entries:
         raise RuntimeError("Ни один сервер не прошёл реальную проверку VPN-туннеля; прежняя подписка сохранится")
 
