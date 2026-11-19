@@ -58,7 +58,7 @@ def decode_payload(text):
     if compact and re.fullmatch(r"[A-Za-z0-9_+/=-]+", compact):
         try:
             decoded = base64.b64decode(compact + "=" * (-len(compact) % 4)).decode("utf-8", "ignore")
-            if any(s in decoded.lower() for s in SCHEMES):
+            if any(s in decoded.lower() for s in SCHEMES) or decoded.lstrip().startswith(("{", "[")):
                 return decoded
         except Exception:
             pass
@@ -68,12 +68,19 @@ def extract_uris(payload):
     payload = decode_payload(payload)
     found = []
     try:
-        profile = json.loads(payload)
+        parsed = json.loads(payload)
     except Exception:
-        profile = None
-    # Convert supported Xray JSON outbounds into portable share links.
-    if isinstance(profile, dict) and isinstance(profile.get("outbounds"), list):
+        parsed = None
+
+    # Providers may publish either a single Xray profile or a JSON array
+    # of profiles. Normalize both into ordinary share links.
+    profiles = parsed if isinstance(parsed, list) else [parsed]
+    for profile in profiles:
+        if not isinstance(profile, dict) or not isinstance(profile.get("outbounds"), list):
+            continue
         for outbound in profile["outbounds"]:
+            if not isinstance(outbound, dict):
+                continue
             protocol = str(outbound.get("protocol", "")).lower()
             settings = outbound.get("settings", {})
             stream = outbound.get("streamSettings", {})
@@ -81,18 +88,21 @@ def extract_uris(payload):
                 continue
             servers = settings.get("vnext", []) if protocol == "vless" else settings.get("servers", [])
             for server in servers:
-                host, port = str(server.get("address", "")).strip(), int(server.get("port", 0) or 0)
+                host = str(server.get("address", "")).strip()
+                port = int(server.get("port", 0) or 0)
                 users = server.get("users", []) if protocol == "vless" else [server]
                 for user in users:
                     credential = str(user.get("id", "") if protocol == "vless" else user.get("password", ""))
                     if not host or not port or not credential:
                         continue
                     params = {}
-                    if stream.get("network"):
-                        params["type"] = stream["network"]
+                    network = str(stream.get("network", "tcp"))
+                    if network:
+                        params["type"] = network
                     if stream.get("security"):
                         params["security"] = stream["security"]
-                    tls, reality = stream.get("tlsSettings", {}), stream.get("realitySettings", {})
+                    tls = stream.get("tlsSettings", {})
+                    reality = stream.get("realitySettings", {})
                     if tls.get("serverName") or reality.get("serverName"):
                         params["sni"] = tls.get("serverName") or reality.get("serverName")
                     if tls.get("fingerprint") or reality.get("fingerprint"):
@@ -103,19 +113,30 @@ def extract_uris(payload):
                         params["pbk"] = reality["publicKey"]
                     if reality.get("shortId"):
                         params["sid"] = reality["shortId"]
-                    transport = stream.get("xhttpSettings") or stream.get("wsSettings") or stream.get("grpcSettings") or {}
+                    transport = (stream.get("xhttpSettings") or stream.get("wsSettings")
+                                 or stream.get("grpcSettings") or {})
                     if transport.get("path"):
                         params["path"] = transport["path"]
                     if transport.get("host"):
                         params["host"] = transport["host"]
+                    if transport.get("serviceName"):
+                        params["serviceName"] = transport["serviceName"]
+                    if transport.get("mode"):
+                        params["mode"] = transport["mode"]
+                    if transport.get("extra"):
+                        extra = json.dumps(transport["extra"], separators=(",", ":")).encode("utf-8")
+                        params["extra"] = base64.urlsafe_b64encode(extra).decode("ascii").rstrip("=")
                     if user.get("flow"):
                         params["flow"] = user["flow"]
                     if user.get("encryption"):
                         params["encryption"] = user["encryption"]
-                    fragment = quote(str(outbound.get("tag") or profile.get("remarks") or "Xray server"), safe="")
+                    tag = outbound.get("tag") or profile.get("remarks") or profile.get("name") or "Xray server"
+                    fragment = quote(str(tag), safe="")
                     found.append(f"{protocol}://{quote(credential, safe='')}@{host}:{port}?{urlencode(params)}#{fragment}")
+
     if found:
         return found
+
     for line in payload.splitlines():
         line = line.strip().strip("\ufeff")
         if not line or line.startswith(("#", ";")):
@@ -336,7 +357,17 @@ def xray_outbound(uri):
             stream["grpcSettings"] = {"serviceName": first("serviceName", path.lstrip("/"))}
         elif network in ("xhttp", "splithttp"):
             stream["network"] = "xhttp"
-            stream["xhttpSettings"] = {"path": path or "/", "host": ws_host}
+            xhttp = {"path": path or "/", "host": ws_host}
+            mode = first("mode", "")
+            if mode:
+                xhttp["mode"] = mode
+            encoded_extra = first("extra", "")
+            if encoded_extra:
+                try:
+                    xhttp["extra"] = json.loads(_decode_b64(encoded_extra).decode("utf-8"))
+                except Exception as exc:
+                    raise ValueError(f"Invalid XHTTP extra settings: {exc}")
+            stream["xhttpSettings"] = xhttp
         elif network == "tcp":
             header_type = first("headerType", "none")
             if header_type == "http":
