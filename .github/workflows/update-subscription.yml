@@ -49,30 +49,6 @@ jobs:
           WEPOGP_SOURCE_2_URL: ${{ secrets.WEPOGP_SOURCE_2_URL }}
         run: python3 .github/scripts/build_subscription.py
 
-      - name: Remove non-portable XHTTP extra from HAPP links
-        shell: python
-        run: |
-          from pathlib import Path
-          from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
-
-          path = Path("mimic-vpn.txt")
-          lines = path.read_text(encoding="utf-8").splitlines()
-          output = []
-          changed = 0
-          for line in lines:
-              if not line.startswith(("vless://", "vmess://", "trojan://", "ss://")):
-                  output.append(line)
-                  continue
-              parts = urlsplit(line)
-              params = parse_qsl(parts.query, keep_blank_values=True)
-              filtered = [(key, value) for key, value in params if key.lower() != "extra"]
-              if len(filtered) != len(params):
-                  changed += 1
-              output.append(urlunsplit((parts.scheme, parts.netloc, parts.path,
-                                        urlencode(filtered), parts.fragment)))
-          path.write_text("\n".join(output) + "\n", encoding="utf-8")
-          print(f"Removed XHTTP extra from {changed} links; all server entries retained.")
-
       - name: Publish subscription safely
         shell: bash
         run: |
