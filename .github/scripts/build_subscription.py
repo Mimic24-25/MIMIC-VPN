@@ -935,7 +935,7 @@ def main():
         raise RuntimeError("Не удалось определить страны ни для одного сервера; прежняя подписка сохранится")
     OUT.write_text("\n".join(output) + "\n", encoding="utf-8")
     print(f"Готово: {len(output)-1} серверов прошли реальный VPN-тест; не прошли тест: {active_failed}; неподдерживаемые форматы/транспорты: {unsupported}; исключено без страны: {skipped}")
-    for country in required_countries:
+    for country in winner_countries:
         winner = best_by_country[country]
         measured = latency_ms.get(winner, float("inf"))
         latency_text = f"{measured:.1f} ms" if measured != float("inf") else "TCP latency unavailable"
