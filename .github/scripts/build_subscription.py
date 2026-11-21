@@ -528,12 +528,12 @@ def active_vpn_test(uri, baseline_ip=None, timeout=10):
                         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as checks:
                             observed = list(checks.map(check_endpoint, urls))
                         valid = [ip for ip, _ in observed if ip]
-                        if len(valid) < 2:
+                        if len(valid) != 3:
                             reasons = "; ".join(
                                 f"{urls[i].split('/')[2]}: {reason}"
                                 for i, (ip, reason) in enumerate(observed) if not ip
                             )
-                            return None, f"Only {len(valid)}/3 independent HTTPS IP checks succeeded" + (f" ({reasons})" if reasons else "")
+                            return None, f"Only {len(valid)}/3 independent HTTPS IP checks succeeded; all 3 are required" + (f" ({reasons})" if reasons else "")
                         if len(set(valid)) != 1:
                             return None, "HTTPS providers reported inconsistent VPN exit IPs: " + ", ".join(valid)
                         return valid[0], ""
@@ -854,27 +854,20 @@ def main():
     if not entries:
         raise RuntimeError("Ни один сервер не прошёл реальную проверку VPN-туннеля; прежняя подписка сохранится")
 
-    # Publish four country-specific winners only when every country has at
-    # least one server that passed the full active VPN tunnel checks.
-    required_countries = ("Нидерланды", "Германия", "Финляндия", "США")
-    missing = [country for country in required_countries
-               if not any(item[0] == country for item in entries)]
-    if missing:
-        raise RuntimeError(
-            "Не найдены прошедшие полную VPN-проверку серверы для обязательных стран: "
-            + ", ".join(missing)
-            + ". Прежняя подписка сохранится."
-        )
+    # Rank only servers that passed every active VPN check. Missing preferred
+    # countries must not discard otherwise-working servers from the subscription.
+    preferred_countries = ("Нидерланды", "Германия", "Финляндия", "США")
+    present_countries = {country for country, _ in entries}
+    winner_countries = [country for country in preferred_countries if country in present_countries]
+    winner_countries.extend(sorted(present_countries - set(preferred_countries)))
 
-    # Rank only already-working servers by HTTPS GET response latency
-    # measured through their own Xray/SOCKS VPN tunnel.
     latency_ms = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
         latency_futures = {pool.submit(endpoint_latency_ms, uri): uri for _, uri in entries}
         for future in concurrent.futures.as_completed(latency_futures):
             latency_ms[latency_futures[future]] = future.result()
     best_by_country = {}
-    for country in required_countries:
+    for country in winner_countries:
         candidates = [uri for item_country, uri in entries if item_country == country]
         best_by_country[country] = min(
             candidates,
@@ -884,7 +877,7 @@ def main():
     best_uris = set(best_by_country.values())
     ordered_entries = [
         (country, best_by_country[country], True)
-        for country in required_countries
+        for country in winner_countries
     ]
     ordered_entries.extend(
         (country, uri, False)
@@ -947,7 +940,7 @@ def main():
         measured = latency_ms.get(winner, float("inf"))
         latency_text = f"{measured:.1f} ms" if measured != float("inf") else "TCP latency unavailable"
         print(f"Лучший сервер — {country}: {latency_text}")
-    print("Проверка включает запуск Xray, SOCKS-туннель, два последовательных раунда по 3 независимым HTTPS-проверкам (минимум 2 совпадающих ответа в каждом раунде), одинаковый VPN exit IP в обоих раундах и сравнение с прямым IP GitHub runner.")
+    print("Проверка включает запуск Xray, SOCKS-туннель, два последовательных раунда: все 3 независимые HTTPS-проверки должны успешно ответить в каждом раунде и сообщить одинаковый VPN exit IP; IP также сравнивается с прямым IP GitHub runner.")
     print(f"Всего уникальных конфигов: {len(raw_entries)}; прошли геолокацию и отправлены на активный тест: {len(tested_keys)}; без определённой страны: {untested_country}.")
 
 if __name__ == "__main__":
