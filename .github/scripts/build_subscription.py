@@ -452,7 +452,7 @@ def enforce_transport_security(uri):
 
 
 def active_vpn_test(uri, baseline_ip=None, timeout=10):
-    """Pass independent HTTPS checks through Xray and verify the VPN exit IP."""
+    """Require a stable VPN exit plus YouTube and Telegram HTTPS reachability."""
     xray = os.environ.get("XRAY_BIN", "xray")
     if not shutil.which(xray):
         return False, "Xray binary is not installed"
@@ -495,17 +495,20 @@ def active_vpn_test(uri, baseline_ip=None, timeout=10):
                         detail = xray_error()
                         return False, "Local SOCKS proxy did not start" + (f": {detail}" if detail else "")
 
-                    urls = [
+                    proxy_args = ["--socks5-hostname", f"127.0.0.1:{socks_port}",
+                                  "--connect-timeout", "5", "--max-time", str(timeout),
+                                  "--location", "--max-redirs", "5"]
+
+                    ip_urls = [
                         "https://api.ipify.org",
                         "https://checkip.amazonaws.com",
                         "https://ipv4.icanhazip.com",
                     ]
 
-                    def check_endpoint(url):
+                    def check_ip(url):
                         try:
                             result = subprocess.run(
-                                ["curl", "-4", "-fsS", "--request", "GET", "--socks5-hostname", f"127.0.0.1:{socks_port}",
-                                 "--connect-timeout", "5", "--max-time", str(timeout), url],
+                                ["curl", "-4", "-fsS", "--request", "GET", *proxy_args, url],
                                 capture_output=True, text=True, timeout=timeout + 2)
                             if result.returncode != 0:
                                 reason = (result.stderr or f"curl exit {result.returncode}").strip()
@@ -524,35 +527,86 @@ def active_vpn_test(uri, baseline_ip=None, timeout=10):
                         except OSError as exc:
                             return None, f"curl execution failed: {exc}"
 
+                    def probe_http(url):
+                        """Return final HTTP status; any TLS/transport error is a failure."""
+                        try:
+                            result = subprocess.run(
+                                ["curl", "-4", "-sS", "--request", "GET", *proxy_args,
+                                 "--output", os.devnull, "--write-out", "%{http_code}", url],
+                                capture_output=True, text=True, timeout=timeout + 2)
+                            if result.returncode != 0:
+                                reason = (result.stderr or f"curl exit {result.returncode}").strip()
+                                return None, reason[:160]
+                            try:
+                                status = int(result.stdout.strip())
+                            except ValueError:
+                                return None, "no HTTP status received"
+                            return status, ""
+                        except subprocess.TimeoutExpired:
+                            return None, "request timed out"
+                        except OSError as exc:
+                            return None, f"curl execution failed: {exc}"
+
+                    def check_services():
+                        # YouTube's generate_204 endpoint is used by its clients as a
+                        # lightweight connectivity probe. A normal homepage response
+                        # is accepted as a fallback when the probe is redirected.
+                        yt_status, yt_error = probe_http("https://www.youtube.com/generate_204")
+                        youtube_ok = yt_status == 204
+                        if not youtube_ok:
+                            home_status, home_error = probe_http("https://www.youtube.com/")
+                            youtube_ok = home_status is not None and 200 <= home_status < 400
+                            if not youtube_ok:
+                                reason = yt_error or f"generate_204 returned HTTP {yt_status}"
+                                reason += "; homepage: " + (home_error or f"HTTP {home_status}")
+                                return False, "YouTube unavailable (" + reason + ")"
+
+                        # Telegram Web is the user-facing web client. The public
+                        # Telegram site is a fallback reachability signal, not a
+                        # guarantee that native-app messaging works.
+                        tg_status, tg_error = probe_http("https://web.telegram.org/a/")
+                        telegram_ok = tg_status is not None and 200 <= tg_status < 400
+                        if not telegram_ok:
+                            site_status, site_error = probe_http("https://telegram.org/")
+                            telegram_ok = site_status is not None and 200 <= site_status < 400
+                            if not telegram_ok:
+                                reason = tg_error or f"web.telegram.org returned HTTP {tg_status}"
+                                reason += "; telegram.org: " + (site_error or f"HTTP {site_status}")
+                                return False, "Telegram unavailable (" + reason + ")"
+                        return True, f"YouTube OK (HTTP {yt_status if yt_status is not None else 'fallback'}); Telegram OK (HTTP {tg_status if tg_status is not None else 'fallback'})"
+
                     def verify_round():
                         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as checks:
-                            observed = list(checks.map(check_endpoint, urls))
+                            observed = list(checks.map(check_ip, ip_urls))
                         valid = [ip for ip, _ in observed if ip]
                         if len(valid) != 3:
                             reasons = "; ".join(
-                                f"{urls[i].split('/')[2]}: {reason}"
+                                f"{ip_urls[i].split('/')[2]}: {reason}"
                                 for i, (ip, reason) in enumerate(observed) if not ip
                             )
                             return None, f"Only {len(valid)}/3 independent HTTPS IP checks succeeded; all 3 are required" + (f" ({reasons})" if reasons else "")
                         if len(set(valid)) != 1:
                             return None, "HTTPS providers reported inconsistent VPN exit IPs: " + ", ".join(valid)
-                        return valid[0], ""
+                        services_ok, services_detail = check_services()
+                        if not services_ok:
+                            return None, services_detail
+                        return valid[0], services_detail
 
-                    # A single successful probe can be a transient response. Require
-                    # two consecutive independent rounds through the same VPN exit.
-                    first_ip, first_error = verify_round()
+                    # Require two consecutive rounds: all three IP providers must
+                    # agree, and both target services must answer through this proxy.
+                    first_ip, first_detail = verify_round()
                     if not first_ip:
-                        return False, first_error
+                        return False, first_detail
                     time.sleep(1)
-                    second_ip, second_error = verify_round()
+                    second_ip, second_detail = verify_round()
                     if not second_ip:
-                        return False, "Second stability check failed: " + second_error
+                        return False, "Second stability check failed: " + second_detail
                     if first_ip != second_ip:
                         return False, f"VPN exit IP changed between stability checks: {first_ip} -> {second_ip}"
-                    exit_ip = second_ip
-                    if baseline_ip and exit_ip == baseline_ip:
+                    if baseline_ip and second_ip == baseline_ip:
                         return False, "Exit IP matches GitHub runner direct IP; VPN tunnel not confirmed"
-                    return True, exit_ip
+                    print(f"Сервисы через VPN: {second_detail}; exit IP: {second_ip}")
+                    return True, f"{second_ip}; {second_detail}"
                 finally:
                     proc.terminate()
                     try:
@@ -562,7 +616,6 @@ def active_vpn_test(uri, baseline_ip=None, timeout=10):
                         proc.wait(timeout=2)
     except Exception as exc:
         return False, str(exc)
-
 
 def filter_reachable(entries):
     """Keep only entries that prove a distinct VPN exit via multiple HTTPS providers."""
